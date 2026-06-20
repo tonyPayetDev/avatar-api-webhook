@@ -185,7 +185,7 @@ const server = http.createServer(async (req, res) => {
 
         // Step 5: Envoyer email
         console.log('\n[Step 5/5] Sending email...');
-        const emailResult = await sendEmail(userEmail, resultUrl, outputPath);
+        const emailResult = await sendEmail(userEmail, resultUrl);
         console.log(`✓ Email sent: ${userEmail}`);
 
         // Response
