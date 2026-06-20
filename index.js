@@ -3,33 +3,30 @@ import https from 'https';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { execSync } from 'child_process';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = 3000;
+const UPLOADS_DIR = '/tmp/uploads';
+const VIDEOS_DIR = '/tmp/videos';
 
-// Fonction pour télécharger un fichier
-function downloadFile(url) {
+fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+fs.mkdirSync(VIDEOS_DIR, { recursive: true });
+
+function downloadFile(url, destPath) {
   return new Promise((resolve, reject) => {
     const protocol = url.startsWith('https') ? https : http;
-    const filename = path.basename(url.split('?')[0]) || 'file.tmp';
-    const filepath = `/tmp/${filename}`;
-    const file = fs.createWriteStream(filepath);
-
+    const file = fs.createWriteStream(destPath);
     protocol.get(url, (response) => {
       response.pipe(file);
-      file.on('finish', () => {
-        file.close();
-        resolve(filepath);
-      });
+      file.on('finish', () => { file.close(); resolve(destPath); });
     }).on('error', reject);
   });
 }
 
-// Fonction pour rechercher avec Claude
 async function searchClaudeInfo(topic) {
-  console.log(`[Claude] Recherche info sur: ${topic}`);
   return {
     aiTips: "Utilise des transitions fluides entre les scènes",
     automationTrick: "Automatise le rendu vidéo avec FFmpeg en batch processing",
@@ -37,206 +34,202 @@ async function searchClaudeInfo(topic) {
   };
 }
 
-// Fonction pour appeler FFmpeg API réelle
 async function composeVideo(videoUrl, audioUrl) {
-  console.log(`[FFmpeg] Calling FFmpeg API at https://ffmpeg.tonypayet.com/combine`);
-
   return new Promise((resolve, reject) => {
-    const payload = JSON.stringify({
-      videoUrl: videoUrl,
-      audioUrl: audioUrl
-    });
-
+    const payload = JSON.stringify({ videoUrl, audioUrl });
     const url = new URL('https://ffmpeg.tonypayet.com/combine');
     const req = https.request({
       hostname: url.hostname,
       path: url.pathname,
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(payload)
-      }
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }
     }, (res) => {
       let data = '';
       res.on('data', chunk => { data += chunk; });
       res.on('end', () => {
         try {
           const result = JSON.parse(data);
-          console.log(`[FFmpeg] Response: ${JSON.stringify(result)}`);
           const outputUrl = result.url || result.outputUrl || result.videoUrl;
           if (!outputUrl) throw new Error('No URL in response');
-          resolve({
-            success: true,
-            outputUrl,
-            duration: result.duration || "30s",
-            codec: "h264",
-            format: "mp4"
-          });
+          resolve({ success: true, outputUrl, duration: result.duration || "30s", codec: "h264", format: "mp4" });
         } catch (e) {
-          console.error(`[FFmpeg] Parse error: ${e.message}, raw: ${data.substring(0, 200)}`);
           reject(new Error(`FFmpeg API error: ${e.message}`));
         }
       });
     });
-
-    req.on('error', (err) => {
-      console.error('[FFmpeg] Request error:', err.message);
-      reject(err);
-    });
-
+    req.on('error', reject);
     req.write(payload);
     req.end();
   });
 }
 
-// Fonction pour envoyer l'email
-async function sendEmail(toEmail, videoUrl, videoPath) {
-  const emailContent = `
-Subject: ✅ Your Avatar AI Video is Ready!
-To: ${toEmail}
-From: avatar-api@automatisationboost.com
-Date: ${new Date().toISOString()}
-
-🎬 AVATAR AI VIDEO - READY FOR TIKTOK
-
-✅ Status: COMPLETE
-
-📊 Details:
-- Video: ${videoUrl}
-- Format: MP4 (1080x1920 vertical)
-- Codec: H.264
-- Ready: Yes ✓
-
-🚀 Next: Review & Post to TikTok
-
----
-Avatar AI Webhook API
-  `;
-
-  console.log(`[Email] Sending to ${toEmail}`);
+async function sendEmail(toEmail, videoUrl) {
+  console.log(`[Email] Sending to ${toEmail}: ${videoUrl}`);
   return { sent: true, to: toEmail };
 }
 
-// Créer le serveur
-const server = http.createServer(async (req, res) => {
+function getBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', chunk => { body += chunk.toString(); });
+    req.on('end', () => resolve(body));
+    req.on('error', reject);
+  });
+}
 
-  // Enable CORS
+function serveStaticFile(res, filePath, contentType) {
+  if (!fs.existsSync(filePath)) {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'File not found' }));
+    return;
+  }
+  const stat = fs.statSync(filePath);
+  res.writeHead(200, {
+    'Content-Type': contentType,
+    'Content-Length': stat.size,
+    'Access-Control-Allow-Origin': '*'
+  });
+  fs.createReadStream(filePath).pipe(res);
+}
+
+const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  if (req.method === 'OPTIONS') {
-    res.writeHead(200);
-    res.end();
+  if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
+
+  const url = new URL(req.url, `http://localhost:${PORT}`);
+  const pathname = url.pathname;
+
+  // Route: POST /upload?filename=xxx — raw binary upload (no multer needed)
+  if (req.method === 'POST' && pathname === '/upload') {
+    const filename = url.searchParams.get('filename') || `upload-${Date.now()}.png`;
+    const safeName = path.basename(filename);
+    const destPath = path.join(UPLOADS_DIR, safeName);
+    const file = fs.createWriteStream(destPath);
+
+    req.pipe(file);
+    file.on('finish', () => {
+      const host = req.headers.host || `localhost:${PORT}`;
+      const fileUrl = `http://${host}/uploads/${safeName}`;
+      console.log(`[Upload] Saved: ${destPath} → ${fileUrl}`);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, url: fileUrl, filename: safeName }));
+    });
+    file.on('error', (err) => {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    });
+    return;
+  }
+
+  // Route: GET /uploads/:filename — serve uploaded files
+  if (req.method === 'GET' && pathname.startsWith('/uploads/')) {
+    const filename = path.basename(pathname);
+    serveStaticFile(res, path.join(UPLOADS_DIR, filename), 'image/png');
+    return;
+  }
+
+  // Route: GET /videos/:filename — serve generated videos
+  if (req.method === 'GET' && pathname.startsWith('/videos/')) {
+    const filename = path.basename(pathname);
+    serveStaticFile(res, path.join(VIDEOS_DIR, filename), 'video/mp4');
+    return;
+  }
+
+  // Route: POST /slideshow — create video slideshow from image URLs
+  if (req.method === 'POST' && pathname === '/slideshow') {
+    try {
+      const body = await getBody(req);
+      const { imageUrls, duration = 3, outputFilename } = JSON.parse(body);
+
+      if (!imageUrls || !Array.isArray(imageUrls) || imageUrls.length === 0) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'imageUrls array is required' }));
+        return;
+      }
+
+      const slideDir = `/tmp/slides-${Date.now()}`;
+      fs.mkdirSync(slideDir, { recursive: true });
+
+      console.log(`[Slideshow] Downloading ${imageUrls.length} images...`);
+      for (let i = 0; i < imageUrls.length; i++) {
+        const dest = path.join(slideDir, `slide-${String(i + 1).padStart(3, '0')}.png`);
+        await downloadFile(imageUrls[i], dest);
+        console.log(`[Slideshow] ✓ Image ${i + 1}/${imageUrls.length}`);
+      }
+
+      const videoName = outputFilename || `slideshow-${Date.now()}.mp4`;
+      const videoPath = path.join(VIDEOS_DIR, videoName);
+
+      console.log(`[Slideshow] Creating video with ffmpeg...`);
+      execSync(
+        `ffmpeg -y -framerate 1/${duration} -i "${slideDir}/slide-%03d.png" ` +
+        `-vf "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,fps=25" ` +
+        `-c:v libx264 -pix_fmt yuv420p "${videoPath}"`,
+        { stdio: 'pipe' }
+      );
+
+      fs.rmSync(slideDir, { recursive: true });
+
+      const host = req.headers.host || `localhost:${PORT}`;
+      const videoUrl = `http://${host}/videos/${videoName}`;
+      console.log(`[Slideshow] ✅ Done: ${videoUrl}`);
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, videoUrl, filename: videoName }));
+    } catch (error) {
+      console.error('[Slideshow] Error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
     return;
   }
 
   // Route: POST /avatar/generate
-  if (req.method === 'POST' && req.url === '/avatar/generate') {
-    let body = '';
+  if (req.method === 'POST' && pathname === '/avatar/generate') {
+    try {
+      const body = await getBody(req);
+      const params = JSON.parse(body);
+      const { avatarUrl, voiceUrl, topic, userEmail } = params;
 
-    req.on('data', chunk => {
-      body += chunk.toString();
-    });
+      console.log('\n═══════════════════════════════════════');
+      console.log('🎬 AVATAR AI WEBHOOK - PROCESSING');
+      console.log(`Topic: ${topic} | Email: ${userEmail}`);
 
-    req.on('end', async () => {
-      try {
-        const params = JSON.parse(body);
-        const { avatarUrl, voiceUrl, topic, userEmail } = params;
+      const claudeInfo = await searchClaudeInfo(topic);
+      const videoPath = await downloadFile(avatarUrl, `/tmp/${path.basename(avatarUrl.split('?')[0]) || 'avatar.mp4'}`);
+      const audioPath = await downloadFile(voiceUrl, `/tmp/${path.basename(voiceUrl.split('?')[0]) || 'voice.mp3'}`);
 
-        console.log('\n═════════════════════════════════════════');
-        console.log('🎬 AVATAR AI WEBHOOK - PROCESSING');
-        console.log('═════════════════════════════════════════');
-        console.log(`Topic: ${topic}`);
-        console.log(`Email: ${userEmail}`);
-        console.log(`Avatar: ${avatarUrl}`);
-        console.log(`Voice: ${voiceUrl}`);
+      const composed = await composeVideo(avatarUrl, voiceUrl);
+      await sendEmail(userEmail, composed.outputUrl);
 
-        // Step 1: Recherche Claude
-        console.log('\n[Step 1/5] Searching Claude AI info...');
-        const claudeInfo = await searchClaudeInfo(topic);
-        console.log(`✓ Found: ${claudeInfo.aiTips}`);
-
-        // Step 2: Télécharger les fichiers
-        console.log('\n[Step 2/5] Downloading files...');
-        const videoPath = await downloadFile(avatarUrl);
-        const audioPath = await downloadFile(voiceUrl);
-        console.log(`✓ Video: ${videoPath}`);
-        console.log(`✓ Audio: ${audioPath}`);
-
-        // Step 3: Composer la vidéo
-        console.log('\n[Step 3/5] Composing video + audio via FFmpeg API...');
-        const composed = await composeVideo(avatarUrl, voiceUrl);
-        console.log(`✓ Composed: ${composed.outputUrl}`);
-
-        // Step 4: Résultat FFmpeg
-        console.log('\n[Step 4/5] Video composition complete');
-        const resultUrl = composed.outputUrl;
-        console.log(`✓ Video URL: ${resultUrl}`);
-
-        // Step 5: Envoyer email
-        console.log('\n[Step 5/5] Sending email...');
-        const emailResult = await sendEmail(userEmail, resultUrl);
-        console.log(`✓ Email sent: ${userEmail}`);
-
-        // Response
-        const response = {
-          status: "success",
-          message: "Avatar video generated and email sent",
-          data: {
-            videoUrl: resultUrl,
-            topic: topic,
-            claudeInfo: claudeInfo,
-            email: {
-              to: userEmail,
-              subject: "✅ Your Avatar AI Video is Ready!",
-              status: "sent"
-            },
-            timestamp: new Date().toISOString()
-          }
-        };
-
-        console.log('\n═════════════════════════════════════════');
-        console.log('✅ WEBHOOK COMPLETED SUCCESSFULLY');
-        console.log('═════════════════════════════════════════\n');
-
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(response, null, 2));
-
-      } catch (error) {
-        console.error('❌ Error:', error.message);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          status: "error",
-          message: error.message
-        }));
-      }
-    });
-
-  } else if (req.url === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: "ok" }));
-
-  } else {
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      message: "Endpoint not found. Use POST /avatar/generate",
-      endpoints: [
-        "POST /avatar/generate - Generate avatar video",
-        "GET /health - Health check"
-      ]
-    }));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        status: "success",
+        data: { videoUrl: composed.outputUrl, topic, claudeInfo, email: { to: userEmail, status: "sent" }, timestamp: new Date().toISOString() }
+      }));
+    } catch (error) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: "error", message: error.message }));
+    }
+    return;
   }
+
+  // Health check
+  if (pathname === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: "ok", endpoints: ["/upload", "/uploads/:filename", "/videos/:filename", "/slideshow", "/avatar/generate"] }));
+    return;
+  }
+
+  res.writeHead(404, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ message: "Not found", endpoints: ["POST /upload?filename=xxx", "GET /uploads/:filename", "GET /videos/:filename", "POST /slideshow", "POST /avatar/generate", "GET /health"] }));
 });
 
 server.listen(PORT, () => {
-  console.log(`\n🚀 Avatar AI Webhook running on http://localhost:${PORT}`);
-  console.log(`📍 Endpoint: POST http://localhost:${PORT}/avatar/generate`);
-  console.log(`\nExample request:`);
-  console.log(`curl -X POST http://localhost:${PORT}/avatar/generate \\`);
-  console.log(`  -H "Content-Type: application/json" \\`);
-  console.log(`  -d '{\n    "avatarUrl": "https://...",\n    "voiceUrl": "https://...",\n    "topic": "AI automation",\n    "userEmail": "tony@example.com"\n  }'\n`);
+  console.log(`\n🚀 Avatar API running on http://localhost:${PORT}`);
 });
 
-// ES Module export
 export default server;
