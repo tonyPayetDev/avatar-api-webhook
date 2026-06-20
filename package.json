@@ -1,0 +1,17 @@
+{
+  "name": "avatar-api-webhook",
+  "version": "1.0.0",
+  "description": "Avatar AI Video Generator Webhook API",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js"
+  },
+  "keywords": ["avatar", "video", "ai", "webhook"],
+  "author": "Tony PAYET",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
