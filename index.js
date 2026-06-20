@@ -39,17 +39,18 @@ async function searchClaudeInfo(topic) {
 
 // Fonction pour appeler FFmpeg API réelle
 async function composeVideo(videoUrl, audioUrl) {
-  console.log(`[FFmpeg] Calling FFmpeg API at https://ffmpeg.tonypayet.com/compose`);
+  console.log(`[FFmpeg] Calling FFmpeg API at https://ffmpeg.tonypayet.com/combine`);
 
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify({
       videoUrl: videoUrl,
-      audioUrl: audioUrl,
-      output: "mp4"
+      audioUrl: audioUrl
     });
 
-    const options = new URL('https://ffmpeg.tonypayet.com/compose');
-    const req = https.request(options, {
+    const url = new URL('https://ffmpeg.tonypayet.com/combine');
+    const req = https.request({
+      hostname: url.hostname,
+      path: url.pathname,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -62,35 +63,25 @@ async function composeVideo(videoUrl, audioUrl) {
         try {
           const result = JSON.parse(data);
           console.log(`[FFmpeg] Response: ${JSON.stringify(result)}`);
+          const outputUrl = result.url || result.outputUrl || result.videoUrl;
+          if (!outputUrl) throw new Error('No URL in response');
           resolve({
             success: true,
-            outputUrl: result.outputUrl || result.videoUrl || `https://ffmpeg.tonypayet.com/videos/avatar-${Date.now()}.mp4`,
+            outputUrl,
             duration: result.duration || "30s",
             codec: "h264",
             format: "mp4"
           });
         } catch (e) {
-          console.log(`[FFmpeg] Response (raw): ${data.substring(0, 200)}`);
-          resolve({
-            success: true,
-            outputUrl: `https://ffmpeg.tonypayet.com/videos/avatar-${Date.now()}.mp4`,
-            duration: "30s",
-            codec: "h264",
-            format: "mp4"
-          });
+          console.error(`[FFmpeg] Parse error: ${e.message}, raw: ${data.substring(0, 200)}`);
+          reject(new Error(`FFmpeg API error: ${e.message}`));
         }
       });
     });
 
     req.on('error', (err) => {
-      console.error('[FFmpeg] API error:', err.message);
-      resolve({
-        success: true,
-        outputUrl: `https://ffmpeg.tonypayet.com/videos/avatar-${Date.now()}.mp4`,
-        duration: "30s",
-        codec: "h264",
-        format: "mp4"
-      });
+      console.error('[FFmpeg] Request error:', err.message);
+      reject(err);
     });
 
     req.write(payload);
