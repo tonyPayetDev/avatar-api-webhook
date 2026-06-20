@@ -194,7 +194,6 @@ const server = http.createServer(async (req, res) => {
           message: "Avatar video generated and email sent",
           data: {
             videoUrl: resultUrl,
-            videoPath: outputPath,
             topic: topic,
             claudeInfo: claudeInfo,
             email: {
