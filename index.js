@@ -166,7 +166,7 @@ const server = http.createServer(async (req, res) => {
       console.log(`[Slideshow] Creating video with ffmpeg...`);
       execSync(
         `ffmpeg -y -framerate 1/${duration} -i "${slideDir}/slide-%03d.png" ` +
-        `-vf "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,fps=25" ` +
+        `-vf "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,fps=25" ` +
         `-c:v libx264 -pix_fmt yuv420p "${videoPath}"`,
         { stdio: 'pipe' }
       );
