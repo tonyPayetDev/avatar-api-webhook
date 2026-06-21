@@ -3,7 +3,7 @@ import https from 'https';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { execSync } from 'child_process';
+import { execSync, exec } from 'child_process';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -34,33 +34,35 @@ async function searchClaudeInfo(topic) {
   };
 }
 
-async function composeVideo(videoUrl, audioUrl) {
-  return new Promise((resolve, reject) => {
-    const payload = JSON.stringify({ videoUrl, audioUrl });
-    const url = new URL('https://ffmpeg.tonypayet.com/combine');
-    const req = https.request({
-      hostname: url.hostname,
-      path: url.pathname,
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }
-    }, (res) => {
-      let data = '';
-      res.on('data', chunk => { data += chunk; });
-      res.on('end', () => {
-        try {
-          const result = JSON.parse(data);
-          const outputUrl = result.url || result.outputUrl || result.videoUrl;
-          if (!outputUrl) throw new Error('No URL in response');
-          resolve({ success: true, outputUrl, duration: result.duration || "30s", codec: "h264", format: "mp4" });
-        } catch (e) {
-          reject(new Error(`FFmpeg API error: ${e.message}`));
-        }
-      });
-    });
-    req.on('error', reject);
-    req.write(payload);
-    req.end();
-  });
+// scale: 0.0 to 1.0, where 1.0 = plein écran, 0.35 = 35% de la hauteur
+async function composeAvatarLocal(avatarPath, audioPath, scale = 0.35) {
+  const outputName = `avatar-composed-${Date.now()}.mp4`;
+  const outputPath = path.join(VIDEOS_DIR, outputName);
+
+  // Scale avatar to `scale` of its original size, keep 9:16 ratio, pad to 1080x1920
+  // trunc(...)*2 ensures even pixel dimensions required by H.264
+  const scaleW = `trunc(1080*${scale}/2)*2`;
+  const scaleH = `trunc(1920*${scale}/2)*2`;
+
+  const filterComplex = `[0:v]scale=${scaleW}:${scaleH}:flags=lanczos[scaled];[scaled]pad=1080:1920:(1080-iw)/2:(1920-ih)/2:color=black[out]`;
+  const audioParts = audioPath ? [`-i "${audioPath}"`, '-map 1:a', '-c:a aac -b:a 128k -shortest'] : [];
+
+  const cmd = [
+    'ffmpeg -y',
+    `-i "${avatarPath}"`,
+    ...audioParts.slice(0, 1),
+    `-filter_complex "${filterComplex}"`,
+    '-map "[out]"',
+    ...audioParts.slice(1),
+    '-c:v libx264 -preset fast -crf 23',
+    '-pix_fmt yuv420p',
+    `"${outputPath}"`
+  ].filter(Boolean).join(' ');
+
+  console.log(`[Compose] scale=${scale} → ${outputName}`);
+  execSync(cmd, { stdio: 'pipe' });
+
+  return outputPath;
 }
 
 async function sendEmail(toEmail, videoUrl) {
@@ -192,25 +194,32 @@ const server = http.createServer(async (req, res) => {
     try {
       const body = await getBody(req);
       const params = JSON.parse(body);
-      const { avatarUrl, voiceUrl, topic, userEmail } = params;
+      const { avatarUrl, voiceUrl, topic, userEmail, avatarScale = 0.35 } = params;
+
+      const scale = Math.min(1.0, Math.max(0.1, parseFloat(avatarScale)));
 
       console.log('\n═══════════════════════════════════════');
       console.log('🎬 AVATAR AI WEBHOOK - PROCESSING');
-      console.log(`Topic: ${topic} | Email: ${userEmail}`);
+      console.log(`Topic: ${topic} | Email: ${userEmail} | Scale: ${scale}`);
 
       const claudeInfo = await searchClaudeInfo(topic);
-      const videoPath = await downloadFile(avatarUrl, `/tmp/${path.basename(avatarUrl.split('?')[0]) || 'avatar.mp4'}`);
-      const audioPath = await downloadFile(voiceUrl, `/tmp/${path.basename(voiceUrl.split('?')[0]) || 'voice.mp3'}`);
+      const videoPath = await downloadFile(avatarUrl, `/tmp/avatar-${Date.now()}.mp4`);
+      const audioPath = voiceUrl ? await downloadFile(voiceUrl, `/tmp/voice-${Date.now()}.mp3`) : null;
 
-      const composed = await composeVideo(avatarUrl, voiceUrl);
-      await sendEmail(userEmail, composed.outputUrl);
+      const composedPath = await composeAvatarLocal(videoPath, audioPath, scale);
+
+      const host = req.headers.host || `localhost:${PORT}`;
+      const videoUrl = `http://${host}/videos/${path.basename(composedPath)}`;
+
+      await sendEmail(userEmail, videoUrl);
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         status: "success",
-        data: { videoUrl: composed.outputUrl, topic, claudeInfo, email: { to: userEmail, status: "sent" }, timestamp: new Date().toISOString() }
+        data: { videoUrl, topic, claudeInfo, avatarScale: scale, email: { to: userEmail, status: "sent" }, timestamp: new Date().toISOString() }
       }));
     } catch (error) {
+      console.error('[Avatar] Error:', error.message);
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: "error", message: error.message }));
     }
